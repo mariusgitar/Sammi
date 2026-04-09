@@ -4,18 +4,33 @@ import Link from 'next/link'
 import { useEffect, useState } from 'react'
 import type { NormalizedSession } from '@/app/lib/normalizeSession'
 
+const POLL_INTERVAL = 10_000
+
 export default function OversiktPage() {
   const [sessions, setSessions] = useState<NormalizedSession[]>([])
 
   useEffect(() => {
     let mounted = true
+
     const load = async () => {
-      const res = await fetch('/api/admin/sessions')
+      const res = await fetch('/api/admin/sessions', { cache: 'no-store' })
       if (!res.ok) return
-      const data = (await res.json()) as NormalizedSession[]
-      if (mounted) setSessions(data)
+
+      const incoming = (await res.json()) as NormalizedSession[]
+      if (!mounted) return
+
+      setSessions((prev) => (incoming.length > 0 ? incoming : prev))
     }
-    load()
+
+    void load()
+    const intervalId = setInterval(() => {
+      void load()
+    }, POLL_INTERVAL)
+
+    return () => {
+      mounted = false
+      clearInterval(intervalId)
+    }
   }, [])
 
   return (
