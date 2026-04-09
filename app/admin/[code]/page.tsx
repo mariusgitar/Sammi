@@ -4,7 +4,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import { useParams } from 'next/navigation'
 import type { NormalizedSession } from '@/app/lib/normalizeSession'
 
-type ItemRow = {
+type AdminItem = {
   id: string
   text: string
   orderIndex: number
@@ -16,95 +16,74 @@ type ItemRow = {
   createdBy: string | null
 }
 
-const POLL_INTERVAL = 10_000
+const POLL_MS = 10_000
 
 export default function AdminSessionPage() {
   const params = useParams<{ code: string }>()
-  const code = useMemo(() => params.code.toUpperCase(), [params.code])
+  const code = String(params.code ?? '').toUpperCase()
 
   const [session, setSession] = useState<NormalizedSession | null>(null)
-  const [items, setItems] = useState<ItemRow[]>([])
+  const [items, setItems] = useState<AdminItem[]>([])
   const [newItemsText, setNewItemsText] = useState('')
   const [isUpdatingStatus, setIsUpdatingStatus] = useState(false)
   const [isAddingItems, setIsAddingItems] = useState(false)
 
-  const sessionInitialized = useRef(false)
-  const itemsInitialized = useRef(false)
+  const initialized = useRef(false)
 
   useEffect(() => {
-    let active = true
+    if (!code) return
 
-    const loadSession = async () => {
-      const res = await fetch(`/api/sessions/${code}`, { cache: 'no-store' })
-      if (!res.ok) return
+    let mounted = true
 
-      const incoming = (await res.json()) as NormalizedSession
-      if (!active || !incoming?.id) return
+    const load = async () => {
+      const sessionRes = await fetch(`/api/sessions/${code}`)
+      if (sessionRes.ok) {
+        const incomingSession = (await sessionRes.json()) as NormalizedSession
+        if (!mounted) return
 
-      if (!sessionInitialized.current) {
-        setSession(incoming)
-        sessionInitialized.current = true
-        return
+        if (!initialized.current) {
+          initialized.current = true
+          setSession(incomingSession)
+        } else {
+          setSession(incomingSession)
+        }
+
+        const itemsRes = await fetch(`/api/items?sessionId=${encodeURIComponent(incomingSession.id)}`)
+        if (!itemsRes.ok || !mounted) return
+
+        const incomingItems = (await itemsRes.json()) as AdminItem[]
+        setItems((prev) => (incomingItems.length > 0 ? incomingItems : prev))
       }
-
-      setSession((prev) => (incoming ? incoming : prev))
     }
 
-    void loadSession()
-    const intervalId = setInterval(() => {
-      void loadSession()
-    }, POLL_INTERVAL)
+    void load()
+    const interval = setInterval(() => {
+      void load()
+    }, POLL_MS)
 
     return () => {
-      active = false
-      clearInterval(intervalId)
+      mounted = false
+      clearInterval(interval)
     }
   }, [code])
 
-  useEffect(() => {
-    if (!session?.id) return
+  const joinUrl = useMemo(() => {
+    if (typeof window === 'undefined' || !code) return ''
+    return `${window.location.origin}/delta/${code}`
+  }, [code])
 
-    let active = true
+  const updateStatus = async (status: 'active' | 'paused' | 'closed') => {
+    if (!code) return
 
-    const loadItems = async () => {
-      const res = await fetch(`/api/items?sessionId=${session.id}`, { cache: 'no-store' })
-      if (!res.ok) return
-
-      const incoming = (await res.json()) as ItemRow[]
-      if (!active) return
-
-      if (!itemsInitialized.current) {
-        setItems(incoming)
-        itemsInitialized.current = true
-        return
-      }
-
-      setItems((prev) => (incoming.length > 0 ? incoming : prev))
-    }
-
-    void loadItems()
-    const intervalId = setInterval(() => {
-      void loadItems()
-    }, POLL_INTERVAL)
-
-    return () => {
-      active = false
-      clearInterval(intervalId)
-    }
-  }, [session?.id])
-
-  async function updateStatus(status: 'active' | 'paused' | 'closed') {
-    if (!session || session.status === status) return
     setIsUpdatingStatus(true)
-
     try {
       const res = await fetch(`/api/sessions/${code}/status`, {
         method: 'PATCH',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ status }),
       })
-      if (!res.ok) return
 
+      if (!res.ok) return
       const updated = (await res.json()) as NormalizedSession
       setSession(updated)
     } finally {
@@ -112,8 +91,8 @@ export default function AdminSessionPage() {
     }
   }
 
-  async function addItems() {
-    if (!session?.id) return
+  const addItems = async () => {
+    if (!session) return
 
     const lines = newItemsText
       .split('\n')
@@ -122,115 +101,102 @@ export default function AdminSessionPage() {
 
     if (lines.length === 0) return
 
+    const payload = lines.map((text, index) => ({
+      text,
+      orderIndex: items.length + index,
+    }))
+
     setIsAddingItems(true)
-
     try {
-      const payload = {
-        sessionId: session.id,
-        items: lines.map((text, index) => ({
-          text,
-          orderIndex: items.length + index,
-        })),
-      }
-
       const res = await fetch('/api/items', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload),
+        body: JSON.stringify({ sessionId: session.id, items: payload }),
       })
 
       if (!res.ok) return
-
-      const inserted = (await res.json()) as ItemRow[]
-      setItems((prev) => [...prev, ...inserted].sort((a, b) => a.orderIndex - b.orderIndex))
+      const inserted = (await res.json()) as AdminItem[]
+      setItems((prev) => [...prev, ...inserted])
       setNewItemsText('')
     } finally {
       setIsAddingItems(false)
     }
   }
 
-  const joinLink = typeof window === 'undefined' ? `/delta/${code}` : `${window.location.origin}/delta/${code}`
-
-  if (!session) {
-    return (
-      <main className="min-h-screen bg-[#0f172a] p-6 text-white">
-        <div className="mx-auto max-w-4xl rounded-xl bg-[#1e293b] p-4">Laster sesjon…</div>
-      </main>
-    )
-  }
-
   return (
     <main className="min-h-screen bg-[#0f172a] p-6 text-white">
-      <div className="mx-auto flex max-w-4xl flex-col gap-4">
-        <section className="rounded-xl bg-[#1e293b] p-4">
-          <h1 className="text-2xl font-semibold">{session.title}</h1>
-          <p className="mt-3 text-4xl font-bold tracking-widest">{session.code}</p>
-          <p className="mt-2 text-slate-300">Modul: {session.moduleType}</p>
-          <p className="text-slate-300">Status: {session.status}</p>
-        </section>
+      <div className="mb-4 rounded-xl bg-[#1e293b] p-4">
+        <h1 className="text-3xl font-bold">{session?.title ?? 'Laster sesjon...'}</h1>
+        <p className="mt-2 text-3xl font-extrabold tracking-wide">{session?.code ?? code}</p>
+        <p className="mt-2 text-slate-300">Modultype: {session?.moduleType ?? '-'}</p>
+        <p className="text-slate-300">Status: {session?.status ?? '-'}</p>
+      </div>
 
-        <section className="rounded-xl bg-[#1e293b] p-4">
-          <p className="mb-3 font-semibold">Statuskontroll</p>
-          <div className="flex flex-wrap gap-2">
-            {([
-              { label: 'Start', status: 'active' },
-              { label: 'Pause', status: 'paused' },
-              { label: 'Avslutt', status: 'closed' },
-            ] as const).map((entry) => {
-              const disabled = isUpdatingStatus || session.status === entry.status
-              return (
-                <button
-                  key={entry.status}
-                  type="button"
-                  onClick={() => void updateStatus(entry.status)}
-                  disabled={disabled}
-                  className={`rounded-full px-4 py-2 font-semibold text-[#0f172a] ${disabled ? 'cursor-not-allowed bg-[#a78bfa] opacity-40' : 'bg-[#a78bfa]'}`}
-                >
-                  {entry.label}
-                </button>
-              )
-            })}
-          </div>
-        </section>
-
-        <section className="rounded-xl bg-[#1e293b] p-4">
-          <p className="mb-2 font-semibold">Deltakerlenke</p>
-          <p className="select-all break-all rounded-xl bg-[#0f172a] px-3 py-2 text-slate-200">{joinLink}</p>
-        </section>
-
-        <section className="rounded-xl bg-[#1e293b] p-4">
-          <p className="mb-2 font-semibold">Legg til elementer (ett per linje)</p>
-          <textarea
-            value={newItemsText}
-            onChange={(event) => setNewItemsText(event.target.value)}
-            rows={7}
-            placeholder="Skriv hvert element på en ny linje"
-            className="w-full rounded-xl border border-slate-700 bg-[#0f172a] px-3 py-2 text-white"
-          />
+      <div className="mb-4 rounded-xl bg-[#1e293b] p-4">
+        <div className="flex flex-wrap gap-2">
           <button
             type="button"
-            onClick={() => void addItems()}
-            disabled={isAddingItems}
-            className={`mt-3 rounded-full px-4 py-2 font-semibold text-[#0f172a] ${isAddingItems ? 'cursor-not-allowed bg-[#a78bfa] opacity-40' : 'bg-[#a78bfa]'}`}
+            onClick={() => void updateStatus('active')}
+            disabled={isUpdatingStatus || session?.status === 'active'}
+            className="rounded-full bg-[#a78bfa] px-4 py-2 font-semibold text-[#0f172a] disabled:cursor-not-allowed disabled:opacity-40"
           >
-            Legg til elementer
+            Start
           </button>
-        </section>
+          <button
+            type="button"
+            onClick={() => void updateStatus('paused')}
+            disabled={isUpdatingStatus || session?.status === 'paused'}
+            className="rounded-full bg-[#a78bfa] px-4 py-2 font-semibold text-[#0f172a] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Pause
+          </button>
+          <button
+            type="button"
+            onClick={() => void updateStatus('closed')}
+            disabled={isUpdatingStatus || session?.status === 'closed'}
+            className="rounded-full bg-[#a78bfa] px-4 py-2 font-semibold text-[#0f172a] disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            Avslutt
+          </button>
+        </div>
+      </div>
 
-        <section className="rounded-xl bg-[#1e293b] p-4">
-          <p className="mb-2 font-semibold">Elementer</p>
-          {items.length === 0 ? (
-            <p className="text-slate-300">Ingen elementer enda.</p>
-          ) : (
-            <ul className="space-y-2">
-              {items.map((item) => (
-                <li key={item.id} className="rounded-lg bg-[#0f172a] px-3 py-2">
-                  <span className="text-slate-400">#{item.orderIndex + 1}</span> {item.text}
-                </li>
-              ))}
-            </ul>
-          )}
-        </section>
+      <div className="mb-4 rounded-xl bg-[#1e293b] p-4">
+        <p className="mb-2 font-semibold">Deltakerlenke</p>
+        <div className="select-all break-all rounded-xl border border-slate-700 bg-[#0f172a] px-3 py-2 text-slate-200">
+          {joinUrl || `/delta/${code}`}
+        </div>
+      </div>
+
+      <div className="mb-4 rounded-xl bg-[#1e293b] p-4">
+        <p className="mb-2 font-semibold">Legg til elementer (ett per linje)</p>
+        <textarea
+          value={newItemsText}
+          onChange={(event) => setNewItemsText(event.target.value)}
+          rows={6}
+          placeholder="Skriv ett element per linje"
+          className="w-full rounded-xl border border-slate-700 bg-[#0f172a] px-3 py-2 text-white placeholder-slate-500"
+        />
+        <button
+          type="button"
+          onClick={() => void addItems()}
+          disabled={isAddingItems}
+          className="mt-3 rounded-full bg-[#a78bfa] px-4 py-2 font-semibold text-[#0f172a] disabled:cursor-not-allowed disabled:opacity-40"
+        >
+          Legg til elementer
+        </button>
+      </div>
+
+      <div className="mb-4 rounded-xl bg-[#1e293b] p-4">
+        <p className="mb-2 font-semibold">Elementer</p>
+        <ul className="space-y-2">
+          {items.map((item) => (
+            <li key={item.id} className="rounded-lg border border-slate-700 bg-[#0f172a] px-3 py-2 text-slate-200">
+              {item.text}
+            </li>
+          ))}
+          {items.length === 0 && <li className="text-slate-400">Ingen elementer enda.</li>}
+        </ul>
       </div>
     </main>
   )
