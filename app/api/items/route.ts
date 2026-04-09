@@ -47,7 +47,7 @@ export async function POST(request: Request) {
   const body = (await request.json()) as { sessionId?: string; items?: ItemPayload[] }
 
   const sessionId = body.sessionId ?? ''
-  const payload = body.items ?? []
+  const payload = Array.isArray(body.items) ? body.items : []
 
   if (!sessionId) {
     return NextResponse.json({ error: 'sessionId is required' }, { status: 400 })
